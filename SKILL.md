@@ -1,0 +1,157 @@
+---
+name: openrouter-free-model-scout
+description: 查询 OpenRouter (https://openrouter.ai/) 平台上标记为 :free 的免费大模型，按「推理级别 / 模型能力 / 免费活动时间 / 免费热门度」四维分类，加权综合评分后推荐 1-3 个可长期依赖的免费模型；并可用真实推理探测（爆满率 / 流中断 / TTFT / 推理正确率）作为推荐终审闸门。当用户要挑选免费大模型、查免费推理模型、问哪个免费模型最强、或要验证某个免费模型是否真能稳定跑通时使用。触发词："OpenRouter 免费模型"、"免费大模型推荐"、"查免费推理模型"、"OpenRouter free models"、"免费 LLM 选型"、"免费模型对比"、"测试免费模型连接稳定性"。不适用于：非 OpenRouter 平台的数据查询、付费模型的跨平台比价、需要 SLA 保障的生产级选型。
+version: 1.0.0
+agent_created: true
+---
+
+<!--
+治理声明（非主体 · 不写入产物）：
+本文件含版本与署名类治理信息，属元层内容。任何由本技能生成的报告、看板、摘要或提交物
+均不得携带本段治理信息、版本号、署名或本机路径。
+-->
+
+# OpenRouter 免费大模型筛选与推荐
+
+## When to use
+- 用户要在 OpenRouter 上挑选**免费**大模型（免费推理模型、免费 LLM 选型、免费模型排行）。
+- 需要按多个维度对免费模型做**分类比较**，并产出"推理最强 / 能力最强 / 最热门"的综合推荐。
+- 需要验证某个免费模型**是否真能稳定跑通**，而不只看它标称的在线率。
+- 本技能只针对 OpenRouter 这一个数据源；其他平台（如 Together、HuggingFace）不适用。
+
+## 关键共识（必读，避免重蹈覆辙）
+
+> 📄 **对外解释素材**：本技能的完整方法论、统计严谨性、工程可靠性与实测验证叙述，见仓库 `README.md` 的「实测验证 / 结论的置信度 / 测得准不准」三章。用户问「为什么这么测」「凭什么信这个结论」时引用那里。
+
+本技能经实战校准沉淀了三条**易错点**，运行时必须严格执行：
+1. **「推理最强」必须有实测基准，且要做体量感知（lightweight-aware）护栏。**
+   - 选"推理最强"时，**至少 sanity-check 候选是不是轻量/蒸馏变体**（flash / lite / nano / mini / small / xs / lightning / sante / tiny / distil …）——这是常识，不能只盯一个基准数字就封王。
+   - **但不能字面"Flash 一律排除"**："Flash"是厂商命名而非强度标尺。例：inclusionAI `Ling 3.1 Flash` 是 560B 总量混合推理 MoE（25B 激活），实测智能指数 41.1 是免费推理模型里最高的；若按名字禁掉它，反而丢掉真正最强的那个。
+   - **正确口径**：有同族"完整版"且同样实测可用时，不把轻量变体推上"推理最强"宝座；轻量定位里的实测第一**单独标注**，但不抢头衔。
+   - **无任一实测指数（intelligence/coding/agentic 全为 None）→ 标记「未测」并封底（封顶 40），直接剥夺"推理最强"争夺资格**。否则无数据模型会与封顶模型同分，靠列表顺序抽签误封王（`Ling 3.0 Flash Sante` 三项全 None 却曾被误判为推理最强，即此缺陷实例）。
+
+2. **「免费稳定性」是乘子护栏，不是主评分项。**
+   - 综合分 = 加权主分 × 稳定性系数。临期(<30天)限免模型系数 0.6，避免即将到期的模型被优先推荐给用户去用。
+
+3. **「端点在线率」≠「真实推理稳定性」，推荐必须以真实推理探测为终审。**
+   - 路由层 `uptime_last_1d` 只反映「厂商宕机」，**几乎不反映「爆满（429/503）」与「流中断/超时」**——而后两者是免费模型真实使用的主导故障。端点在线率高的模型仍可能高峰爆满、不可用（已实测翻车）。
+   - 实测校准结论（作为反面锚点，模型名取自 OpenRouter 公开目录，任何人可自行复核）：
+     - `thinkingmachines/inkling:free` —— 推理不稳定，经常爆满、中断（端点在线率≈99.3% 却真实不稳）。
+     - `nvidia/nemotron-3-ultra-550b-a55b:free` —— 推理不稳定，经常爆满、中断（端点在线率≈96.2%）。
+     - 历史标杆模型（已下线，仅作行为参照、不对它跑分）：某款免费模型表现稳定、推理性能过关，**这类才值得推荐**——稳定且会推理是双条件，缺一不可。
+   - 修正：模型获「值得推荐」**仅当**真实推理测试达 A/B（标准见 `references/stability_test_standard.md`），而非仅凭高端点在线率；冲突时以真实测试为准并显式标注背离。
+
+## 数据来源与字段映射
+- 全量模型：`GET https://openrouter.ai/api/v1/models` → `data[]`
+- **免费判定**：`pricing.prompt == "0"` 且 `pricing.completion == "0"`（注意字段是字符串）
+- 热门度代理：`GET https://openrouter.ai/api/v1/models/{slug}/endpoints` → 每个模型的提供方数量 / 平均在线率 / 平均延迟
+  - ⚠️ 公开 models API **不含使用量/调用量/热门度字段**，故"免费热门度"只能以「提供方数量」为主代理（托管越广=越可靠），叠加在线率与延迟。这是已知口径局限，报告中必须注明。
+
+## 六步管线
+1. **抓取** `GET /api/v1/models` → 全量模型
+2. **过滤** `pricing.prompt==0 且 pricing.completion==0` → 免费模型
+3. **增强** 逐个 `GET /models/{slug}/endpoints` → 提供方数 / 在线率 / 延迟（并发抓取）
+4. **四维分类**（见下）
+5. **综合评分** 推理×40% + 能力×35% + 热门×25%，再乘免费稳定性护栏
+6. **推荐** 综合 Top3 + 各维度冠军去重，输出 1–3 个
+
+## 第七步（终审）：真实推理稳定性测试（两阶段 · 择时 · 省配额）
+- 完整标准见 `references/stability_test_standard.md`，脚本见 `scripts/inference_stability_test.py`。
+- **必需 `OPENROUTER_API_KEY`**：免费模型推理本身 $0，但仍需 Key 与配额；无 Key 时 skill 必须声明「无法做真实推理测试」，仅给端点代理 + 本标准。
+- **账号有每日次数限制 → 不追求大样本**，采用两阶段：
+  - **阶段一 初筛 (`--phase 1`)**：对全部候选每模型发 **12 次**（默认 12，单窗口）。逐调用测：成功率 / 爆满率(上游 429·503) / 中断率(流截断·超时) / TTFT(P95) / 输出有效率 / **推理正确率（一道简洁逻辑题判定）**。
+    指标**同批产出**：单阶段按 `T1→T4→T2→T3` 轮转，12 次即同时覆盖 轻量/逻辑/代码/长文，**不按指标单独各跑 12 次**。
+    **排除闸门**（无论峰谷，触任一项即排除、不进复筛以省配额）：爆满率>20% / 成功率<75% / 中断率>30% / 逻辑正确率(有样本时)<50%。
+  - **阶段二 复筛 (`--phase 2`)**：仅对初筛通过者，在**另一窗口**再发 **18 次**（`--rounds2`，与初筛间隔 ≥30 分钟、建议 1 小时，形成可辨峰谷）；合并两阶段重算最终评级（幸存者合并 n=30），标记「峰值爆满风险」。可用 `--models` 只复筛指定几个，进一步省配额。
+- **OpenRouter 免费层限额（官方）**：买币 <10 → 20 次/分、50 次/天；≥10 → 1000/分、1000/天。测试须顺序调用、间隔 ≥1s、单次总调用 ≤ 当日配额；上游"爆满"= 429 带 `provider_code`/503 计入爆满率，平台自身 429（无 provider_code）退避重试、不计入模型不稳定；流中限流以 `finish_reason:"error"` 处理。
+- 端点在线率降为「托管可靠性预筛」；**真实推理测试是推荐终审闸门**，冲突以真实测试为准。最终「值得推荐」须两阶段合并达 A/B 且非 D、无峰值爆满风险。
+- **两阶段各出一份独立报告，互不混合**：阶段一 → `phase1_report.html`（初筛快览），阶段二 → `phase2_report.html`（复筛可信结论）。
+- **阶段一过程页（实时看板）**：`scripts/build_live_report.py` 生成 `phase1_live.html`——**拿到免费名单后框架即生成**，
+  测试脚本每完成一次调用即重写本页（限流最快 2s/次，页面自带 3s 自动刷新），逐模型动态显示状态（待测/测试中/完成·淘汰/不可测）、
+  进度、成功/爆满/中断计数与最近 TTFT，直至阶段一结束。该页仅为**过程展示**，不作为结论。
+- **报告表格规则**：**不设「原因」列**，原因/处置/样本说明并入**加宽到 ~56% 的备注列**（靠加宽容器压行高，不砍内容）；
+  被闸门淘汰者评级直接给 `D(不推荐)`，不显示含糊的「样本不足」。
+
+## 禁止规则（一等约束 · 违反即作废）
+
+1. **密钥零写入**：`OPENROUTER_API_KEY` 及其任何派生值，禁止出现在报告、看板、摘要、日志、命令行历史、提交物或对话产物中。只允许通过环境变量传入。
+2. **本机路径零写入**：用户目录绝对路径、内部主机名、内部目录结构，禁止写入任何面向用户的产物。
+3. **无 Key 不得伪造结论**：未持有 `OPENROUTER_API_KEY` 时，禁止推断、估算或虚构推理测试数据；必须显式声明「无法做真实推理测试」，仅给出端点代理指标与测试标准。
+4. **历史标杆不得作为推荐对象**：关键共识中的历史参照模型已下线，**禁止**将其列入推荐、排行或冠军名单，仅可作为口径说明的行为参照。
+5. **治理信息不入产物**：本文件的版本、署名、治理声明段，禁止出现在生成的用户可见产物中。
+
+## 四维分类口径
+- **推理级别**：依据 API `reasoning` 字段（mandatory / default_enabled + 支持 reasoning 参数）+ 模型族启发（r1/think/qwq/deepseek-r1/o1/o3/qwen3-thinking）。分级：强制推理(95) / 默认开启推理(78) / 可选推理(55) / 非推理(25)。
+- **推理实力（质量感知）**：层级分 × 实测质量（`artificial_analysis.intelligence_index` 权重1.0，coding/agentic 权重0.8，取加权均值），即 `strength = 0.45*层级分 + 0.55*质量`。无实测指数 → 封顶 40 且 `measured=False`。
+- **模型能力**：上下文长度（对数刻度 8k→1M）+ 多模态广度（图文/音/视频模态数）+ 基准指数均值 + 工具调用/结构化输出支持。得分 = 上下文0.30 + 模态0.25 + 基准0.35 + 工具加成。
+- **免费活动时间**：`expiration_date` 区分 永久免费(100) / 长期限免(80) / 短期限免(60) / 即将到期<30天(35) / 已过期(5)；`created` 计上架时长。稳定性系数：永久1.0 / 长限免0.95 / 短限免0.85 / 临期0.6 / 过期0.1。
+- **免费热门度（代理）**：提供方数为主（≥4家=95 / 3=82 / 2=65 / 1=40 / 0=20），叠加在线率(0.25)与延迟(0.15)。
+
+## 推荐产出
+- 综合 Top3（按 `composite_final`，已乘稳定性护栏）。
+- 各维度冠军（推理最强 / 能力最强 / 最热门 / 免费最稳）。
+- "推理最强"冠军选取规则：**仅在实测模型里评选 → 优先非轻量变体 → 轻量实测第一单独记「推理最强(轻量定位第一)」**。
+- 输出上限 3 个：优先综合 Top3；若有冠军不在其中，替换其中最低分者。
+
+## 文件契约
+
+阈值、评级与口径的**唯一来源**是 `references/stability_test_standard.md` 与脚本内常量；本文件的数值仅作说明，**不得自造口径或改写阈值**。
+
+| 路径 | 作用 | 加载时机 |
+| --- | --- | --- |
+| `references/stability_test_standard.md` | 第七步完整测试标准：指标定义、三道推理题、两阶段协议、评级表、不可测分类、样本量论证 | 执行第七步前必读 |
+| `scripts/openrouter_free_models.py` | 六步管线主程序 | 第一步 |
+| `scripts/build_report.py` | 读 `free_models_classified.json`，出 Markdown + HTML 报告 | 管线后 |
+| `scripts/inference_stability_test.py` | 两阶段真实推理测试（`--phase 1/2`） | 第七步 |
+| `scripts/build_live_report.py` | 阶段一实时看板生成/刷新 | 拿到免费名单即生成 |
+| `scripts/build_inference_report.py` | 出 `phase1_report.html` / `phase2_report.html` | 各阶段测试后 |
+
+脚本需先复制到工作区再运行（输出落在工作区，避免污染技能目录）。各文件的职责与调用时机如下表，后续扩展脚本时以本表为准。
+
+## 运行方式
+将 `scripts/` 下 5 个脚本复制到当前工作区后运行：
+
+```bash
+# 1) 复制脚本到工作区
+cp <技能目录>/scripts/*.py ./      # Windows: 用对应路径
+# 2) 运行管线（联网实时抓取）
+python openrouter_free_models.py
+# 3) 生成报告（读取上一步的 JSON）
+python build_report.py
+```
+
+参数：
+- `openrouter_free_models.py --use-cache`：不刷新模型列表，仅用本地 `openrouter_models_raw.json`（断网/重测口径时用）。
+
+```bash
+# 4)（终审）真实推理稳定性测试（需 OPENROUTER_API_KEY，免费推理本身 $0）
+export OPENROUTER_API_KEY=sk-or-...
+# 阶段一 初筛：全部候选，每模型 12 次（默认 12），单窗口；同时生成 phase1_live.html 实时看板
+python inference_stability_test.py --phase 1 --from-classified free_models_classified.json --rounds 12 --window offpeak
+# 出阶段一报告（独立一份）
+python build_inference_report.py --phase 1 inference_stability.json phase1_report.html
+# 间隔 ≥30 分钟（建议 1 小时）后，阶段二 复筛：仅初筛通过者，另一窗口再 18 次
+python inference_stability_test.py --phase 2 --rounds2 18 --window peak
+# 出阶段二报告（独立一份）
+python build_inference_report.py --phase 2 inference_stability.json phase2_report.html
+# 或只对用户点名/怀疑模型定向复筛（进一步省配额）：
+python inference_stability_test.py --phase 2 --models thinkingmachines/inkling:free,nvidia/nemotron-3-ultra-550b-a55b:free --rounds2 18 --window peak
+# 单独重建实时看板快照（不跑测试时）：
+python build_live_report.py free_models_classified.json inference_stability.json phase1_live.html
+```
+
+产出文件（落在运行目录）：
+- `free_models_classified.json` — 结构化分类数据
+- `openrouter_free_report.md` — Markdown 摘要
+- `openrouter_free_report.html` — 可视化报告（工作流图 / 推荐卡 / 维度冠军 / 分布 / 全量排名）
+- `openrouter_models_raw.json` — 原始模型列表缓存
+- `inference_stability.json` — 真实推理稳定性逐模型指标 + 评级（第七步产出）
+- `phase1_report.html` / `phase2_report.html` — **阶段一/阶段二各自独立的结果报告**（两阶段不合并出）
+- `phase1_live.html` — 阶段一**实时测试看板**（过程页，非结论）
+
+## 输出给用户的格式
+- 先给**综合 Top3 表**（模型名 / ID / 综合 / 推理 / 能力 / 热门 / 免费窗口）。
+- 再列**各维度冠军**，并明确标注"推理最强"是否为轻量定位第一、是否含未测排除说明。
+- 在方法区透明披露两条共识护栏（体量感知 + 稳定性乘子）与"热门度为提供方数代理"的口径局限。
+- 若已跑第七步真实推理测试：在推荐区附每候选的 成功率 / 爆满率 / 中断率 / TTFT(P95) / 输出有效 / 评级 / 峰值风险，并明确「值得推荐」以真实测试为准（A/B 才推荐）。无 Key 时显式声明无法做真实推理测试，仅给代理+标准。
+- 如需更精确的热度，提示可后续接入 OpenRouter 用量统计接口（当前公开 API 无此字段）。

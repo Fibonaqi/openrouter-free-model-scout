@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 凭据（严禁提交）
+.env
+*.key
+*.pem
+
+# 运行产物（含缓存与本地报告）
+openrouter_models_raw.json
+free_models_classified.json
+inference_stability.json
+openrouter_free_report.md
+openrouter_free_report.html
+phase1_report.html
+phase2_report.html
+phase1_live.html
+
+# 打包产物
+*.zip
+dist/
+build/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
