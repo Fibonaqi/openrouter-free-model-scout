@@ -125,7 +125,7 @@
 ### 4.5 无效测试消除（提升可信度）
 目标：**最大程度增加有效测试、消除无效测试**。
 1. **本机网络/代理故障隔离**：502 Bad Gateway / Tunnel connection failed / SSL UNEXPECTED_EOF /
-   RemoteDisconnected 等属测试基础设施故障，非模型问题 → 标记 `network`，**自动重试 2 次**，
+   RemoteDisconnected 等属测试基础设施故障，非模型问题 → 标记 `network`，**自动重试 4 次（退避 1.5s）**，
    仍失败则从指标中**整体剔除**（不计入成功率/中断率、不进黑名单）。此前这类故障被误计为"中断"，
    曾污染 Nemotron 3 Ultra / Super 的 peak 结果。
 2. **平台自身限流剔除**：429 无 `provider_code`（即本测试被打限）→ 退避重试并剔除，不计入模型不稳定。
